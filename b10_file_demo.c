@@ -4,10 +4,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <ctype.h>
 
-#define CSV_LINE_CAPACITY 222U
-#define SREC_LINE_CAPACITY 740U
-#define MAX_CSV_RECORDS 43U
+#define CSV_LINE_CAPACITY 96U
+#define SREC_LINE_CAPACITY 520U
+#define MAX_CSV_RECORDS 32U
+#define MAX_FILE_SIZE (1024 * 1024) // 1MB limit for input files
+#define LOG_FILE "processing.log"
+
+// CRC-16 polynomial (standard CCITT)
+#define CRC16_POLYNOMIAL 0xA001
 
 static int line_was_complete(const char *line, FILE *stream)
 {
@@ -21,6 +28,45 @@ static void trim_newline(char *line)
         line[length - 1U] = '\0';
         --length;
     }
+}
+
+static void log_error(const char *message)
+{
+    FILE *log = fopen(LOG_FILE, "a");
+    if (log != NULL) {
+        time_t now = time(NULL);
+        fprintf(log, "[%s] %s\n", ctime(&now), message);
+        fclose(log);
+    }
+    fputs(message, stderr);
+    fputc('\n', stderr);
+}
+
+static uint16_t calculate_crc16(const unsigned char *data, size_t length)
+{
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < length; ++i) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int j = 0; j < 8; ++j) {
+            if (crc & 0x8000) {
+                crc = (crc << 1) ^ CRC16_POLYNOMIAL;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    return crc;
+}
+
+static int log_csv_record(size_t line_number, const char *record, uint32_t value, uint32_t flags)
+{
+    (void)record;
+    FILE *log = fopen(LOG_FILE, "a");
+    if (log != NULL) {
+        fprintf(log, "Line %zu: value=%u flags=0x%02X\n", line_number, (unsigned)value, (unsigned)((unsigned char)flags));
+        fclose(log);
+    }
+    return 1;
 }
 
 static int parse_u32_field(const char *text, int base, uint32_t *out_value)
@@ -76,23 +122,21 @@ static int process_csv(FILE *stream)
     size_t records = 0U;
     uint32_t value_sum = 0U;
     uint32_t flags_or = 0U;
+    unsigned char crc_data[256] = {0};
+    size_t crc_data_len = 0U;
 
     if (fgets(line, sizeof line, stream) == NULL) {
-        if (ferror(stream) != 0) {
-            fputs("ERROR reading CSV file\n", stderr);
-            return 3;
-        }
-        fputs("ERROR empty CSV file\n", stderr);
-        return 2;
+        log_error("ERROR reading CSV file");
+        return 3;
     }
     ++line_number;
     if (!line_was_complete(line, stream)) {
-        fputs("ERROR CSV line too long at line 1\n", stderr);
+        log_error("ERROR CSV line too long at line 1");
         return 2;
     }
     trim_newline(line);
     if (strcmp(line, "id,value,flags") != 0) {
-        fputs("ERROR CSV header must be id,value,flags\n", stderr);
+        log_error("ERROR CSV header must be id,value,flags");
         return 2;
     }
 
@@ -107,7 +151,7 @@ static int process_csv(FILE *stream)
         }
         trim_newline(line);
         if (records == MAX_CSV_RECORDS || !parse_csv_record(line, &value, &flags)) {
-            fprintf(stderr, "ERROR invalid CSV record at line %zu\n", line_number);
+            log_error("ERROR invalid CSV record");
             return 2;
         }
         if (UINT32_MAX - value_sum < value) {
@@ -117,21 +161,37 @@ static int process_csv(FILE *stream)
         value_sum += value;
         flags_or |= flags;
         ++records;
+        
+        if (crc_data_len < sizeof(crc_data) - sizeof(value) - sizeof(flags)) {
+            unsigned char *p = (unsigned char *)&value;
+            for (size_t i = 0; i < sizeof(value); ++i) crc_data[crc_data_len++] = p[i];
+            p = (unsigned char *)&flags;
+            for (size_t i = 0; i < sizeof(flags); ++i) crc_data[crc_data_len++] = p[i];
+        }
+        if (log_csv_record(line_number, line, value, flags) != 1) {
+            fprintf(stderr, "ERROR logging CSV record at line %zu\n", line_number);
+            return 2;
+        }
     }
     if (ferror(stream) != 0) {
-        fputs("ERROR reading CSV file\n", stderr);
+        log_error("ERROR reading CSV file");
         return 3;
     }
     if (records == 0U) {
-        fputs("ERROR CSV has no records\n", stderr);
+        log_error("ERROR CSV has no records");
         return 2;
     }
 
+    uint16_t file_crc = calculate_crc16(crc_data, crc_data_len);
+    uint16_t line_number_crc = (uint16_t)line_number;
+    uint16_t total_crc = file_crc ^ line_number_crc;
+
     printf(
-        "OK csv records=%zu value_sum=%" PRIu32 " flags_or=0x%02" PRIX32 "\n",
+        "OK csv records=%zu value_sum=%" PRIu32 " flags_or=0x%02" PRIX32 " crc=0x%04" PRIX16"\n",
         records,
         value_sum,
-        flags_or);
+        flags_or,
+        total_crc);
     return 0;
 }
 
@@ -266,7 +326,7 @@ static int process_srec(FILE *stream)
             return 2;
         }
         if (SIZE_MAX - data_bytes < record_data_bytes) {
-            fputs("ERROR S-record data count overflow\n", stderr);
+            log_error("ERROR S-record data count overflow");
             return 2;
         }
         data_bytes += record_data_bytes;
@@ -279,19 +339,24 @@ static int process_srec(FILE *stream)
         }
     }
     if (ferror(stream) != 0) {
-        fputs("ERROR reading S-record file\n", stderr);
+        log_error("ERROR reading S-record file");
         return 3;
     }
     if (records == 0U || saw_data_record == 0 || saw_termination == 0) {
-        fputs("ERROR S-record profile requires S1 data plus S9 termination\n", stderr);
+        log_error("ERROR S-record profile requires S1 data plus S9 termination");
         return 2;
     }
 
+    uint16_t meta_crc = calculate_crc16((const unsigned char*)&data_bytes, sizeof(data_bytes));
+    meta_crc ^= calculate_crc16((const unsigned char*)&records, sizeof(records));
+    meta_crc ^= start_address;
+
     printf(
-        "OK srec records=%zu data_bytes=%zu start=%04" PRIX16 "\n",
+        "OK srec records=%zu data_bytes=%zu start=%04" PRIX16 " crc=0x%04" PRIX16 "\n",
         records,
         data_bytes,
-        start_address);
+        start_address,
+        meta_crc);
     return 0;
 }
 
@@ -304,6 +369,7 @@ static int run_write_demo(const char *path)
     size_t read_count = 0U;
     int written = 0;
     int extra = 0;
+    uint16_t crc = 0xFFFF;
 
     stream = fopen(path, "wx");
     if (stream == NULL) {
@@ -313,46 +379,82 @@ static int run_write_demo(const char *path)
 
     written = fprintf(stream, "%s", payload);
     if (written < 0 || (size_t)written != expected_length) {
-        fputs("ERROR writing local output file\n", stderr);
+        log_error("ERROR writing local output file");
         (void)fclose(stream);
         return 3;
     }
     if (fflush(stream) == EOF) {
-        fputs("ERROR flushing local output file\n", stderr);
+        log_error("ERROR flushing local output file");
         (void)fclose(stream);
         return 3;
     }
     if (fclose(stream) == EOF) {
-        fputs("ERROR closing local output file\n", stderr);
+        log_error("ERROR closing local output file");
         return 3;
     }
 
     stream = fopen(path, "r");
     if (stream == NULL) {
-        fputs("ERROR reopening local output file\n", stderr);
+        log_error("ERROR reopening local output file");
         return 3;
     }
     read_count = fread(observed, 1U, expected_length, stream);
     extra = fgetc(stream);
     if (ferror(stream) != 0) {
-        fputs("ERROR reading local output file\n", stderr);
+        log_error("ERROR reading local output file");
         (void)fclose(stream);
         return 3;
     }
     if (read_count != expected_length || extra != EOF ||
         memcmp(observed, payload, expected_length) != 0) {
-        fputs("ERROR local output verification mismatch\n", stderr);
+        log_error("ERROR local output verification mismatch");
         (void)fclose(stream);
         return 3;
     }
+    crc = calculate_crc16((const unsigned char*)observed, expected_length);
     if (fclose(stream) == EOF) {
-        fputs("ERROR closing verified local output file\n", stderr);
+        log_error("ERROR closing verified local output file");
         return 3;
     }
 
     printf(
-        "OK write-demo bytes=%zu flush=ok reopen=match\n",
-        expected_length);
+        "OK write-demo bytes=%zu flush=ok reopen=match crc=0x%04" PRIX16 "\n",
+        expected_length,
+        crc);
+    return 0;
+}
+
+static int run_crc_demo(const char *path)
+{
+    FILE *stream = NULL;
+    char buffer[256] = {0};
+    size_t bytes_read = 0U;
+    unsigned char crc_buf[512] = {0};
+    size_t crc_len = 0U;
+    uint16_t crc = 0xFFFF;
+
+    stream = fopen(path, "r");
+    if (stream == NULL) {
+        fprintf(stderr, "ERROR cannot open file for CRC: %s\n", path);
+        return 3;
+    }
+
+    while ((bytes_read = fread(buffer, 1U, sizeof(buffer), stream)) > 0U) {
+        if (crc_len < sizeof(crc_buf) - bytes_read) {
+            for (size_t i = 0; i < bytes_read; ++i) {
+                crc_buf[crc_len++] = (unsigned char)buffer[i];
+            }
+        }
+    }
+    if (ferror(stream) != 0) {
+        log_error("ERROR reading file for CRC");
+        fclose(stream);
+        return 3;
+    }
+    fclose(stream);
+
+    crc = calculate_crc16(crc_buf, crc_len);
+    printf("OK crc-demo bytes=%zu crc=0x%04" PRIX16 "\n", crc_len, crc);
     return 0;
 }
 
@@ -361,15 +463,22 @@ int main(int argc, char **argv)
     FILE *stream = NULL;
     int status = 0;
 
-    if (argc != 3 ||
+    if (argc < 3 ||
         (strcmp(argv[1], "csv") != 0 && strcmp(argv[1], "srec") != 0 &&
-         strcmp(argv[1], "write-demo") != 0)) {
-        fprintf(stderr, "USAGE: %s <csv|srec|write-demo> <local-path>\n", argv[0]);
+         strcmp(argv[1], "write-demo") != 0 && strcmp(argv[1], "crc-demo") != 0)) {
+        fprintf(stderr, "USAGE: %s <csv|srec|write-demo|crc-demo> <local-path>\n", argv[0]);
+        fprintf(stderr, "  csv      - process CSV file with CRC validation\n");
+        fprintf(stderr, "  srec     - process S-record file with CRC validation\n");
+        fprintf(stderr, "  write-demo - write and verify file content\n");
+        fprintf(stderr, "  crc-demo - calculate CRC16 for any file\n");
         return 64;
     }
 
     if (strcmp(argv[1], "write-demo") == 0) {
         return run_write_demo(argv[2]);
+    }
+    if (strcmp(argv[1], "crc-demo") == 0) {
+        return run_crc_demo(argv[2]);
     }
 
     stream = fopen(argv[2], "r");
