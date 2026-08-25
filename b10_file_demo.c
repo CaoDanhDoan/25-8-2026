@@ -311,6 +311,8 @@ static int process_srec(FILE *stream)
                 &record_address)) {
             if (saw_termination != 0) {
                 fprintf(stderr, "ERROR record follows S9 termination at line %zu\n", line_number);
+                fprintf(stderr, "ERROR record follows S9 termination at line %zu\n", line_number);
+                fprintf(stderr, "ERROR record follows S9 termination at line %zu\n", line_number);
             }
             return 2;
         }
