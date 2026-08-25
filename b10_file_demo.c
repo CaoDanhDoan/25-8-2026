@@ -7,14 +7,9 @@
 #include <time.h>
 #include <ctype.h>
 
-#define CSV_LINE_CAPACITY 96U
-#define SREC_LINE_CAPACITY 520U
-#define MAX_CSV_RECORDS 32U
-#define MAX_FILE_SIZE (1024 * 1024) // 1MB limit for input files
-#define LOG_FILE "processing.log"
-
-// CRC-16 polynomial (standard CCITT)
-#define CRC16_POLYNOMIAL 0xA001
+#define CSV_LINE_CAPACITY 123U
+#define SREC_LINE_CAPACITY 250U
+#define MAX_CSV_RECORDS 64U
 
 static int line_was_complete(const char *line, FILE *stream)
 {
