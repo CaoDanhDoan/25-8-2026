@@ -5,9 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CSV_LINE_CAPACITY 96U
-#define SREC_LINE_CAPACITY 520U
-#define MAX_CSV_RECORDS 32U
+#define CSV_LINE_CAPACITY 222U
+#define SREC_LINE_CAPACITY 740U
+#define MAX_CSV_RECORDS 43U
 
 static int line_was_complete(const char *line, FILE *stream)
 {
