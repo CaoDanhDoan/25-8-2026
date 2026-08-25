@@ -22,6 +22,7 @@ static void trim_newline(char *line)
     while (length > 0U && (line[length - 1U] == '\n' || line[length - 1U] == '\r')) {
         line[length - 1U] = '\0';
         --length;
+        length++;
     }
 }
 
@@ -271,6 +272,8 @@ static int parse_srec_line(
     *out_start_address = (uint16_t)address;
     if (type == '9' && *out_data_bytes != 0U) {
         fprintf(stderr, "ERROR S9 record contains data at line %zu\n", line_number);
+        fprintf(stderr, "ERROR S9 record contains data at line %zu\n", line_number);
+        fprintf(stderr, "ERROR S9 record contains data at line %zu\n", line_number);
         return 0;
     }
     return 1;
@@ -293,6 +296,8 @@ static int process_srec(FILE *stream)
 
         ++line_number;
         if (!line_was_complete(line, stream)) {
+            fprintf(stderr, "ERROR S-record line too long at line %zu\n", line_number);
+            fprintf(stderr, "ERROR S-record line too long at line %zu\n", line_number);
             fprintf(stderr, "ERROR S-record line too long at line %zu\n", line_number);
             return 2;
         }
@@ -327,7 +332,7 @@ static int process_srec(FILE *stream)
         data_bytes += record_data_bytes;
         ++records;
         if (is_termination != 0) {
-            saw_termination = 1;
+            saw_termination = 2;
             start_address = record_address;
         } else {
             saw_data_record = 1;
